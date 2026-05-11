@@ -14,7 +14,7 @@ from .types import AgentType, MessageType, TaskStatus
 class AgentMessage(BaseModel):
     """Base message schema exchanged between agents."""
 
-    model_config = ConfigDict(use_enum_values=True, extra="allow")
+    model_config = ConfigDict(extra="allow")
 
     id: UUID = Field(default_factory=uuid4)
     type: MessageType
@@ -46,7 +46,7 @@ class TaskMessage(AgentMessage):
 class ResearchQuery(BaseModel):
     """Input schema for user research requests."""
 
-    model_config = ConfigDict(use_enum_values=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     user_query: str
     session_id: UUID
@@ -56,7 +56,7 @@ class ResearchQuery(BaseModel):
 class AgentResult(BaseModel):
     """Represents the structured output of an agent task."""
 
-    model_config = ConfigDict(use_enum_values=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     task_id: UUID
     agent_type: AgentType

@@ -6,7 +6,7 @@ export enum AgentType {
   WRITER = "WRITER",
 }
 
-export type AgentStatus = "PENDING" | "RUNNING" | "DONE" | "FAILED" | "RETRY";
+export type AgentStatus = "PENDING" | "RUNNING" | "DONE" | "FAILED" | "RETRY" | "CANCELLED";
 
 export enum MessageType {
   TASK_ASSIGN = "TASK_ASSIGN",
@@ -45,4 +45,21 @@ export interface AgentResult {
   content: string;
   sources: string[];
   confidence: number;
+}
+
+export interface ClaimRecord {
+  claim: string;
+  source: string;
+  confidence: number;
+  task_id?: string;
+}
+
+export interface ReportEnvelope {
+  session_id: string;
+  report: string;
+  sources: string[];
+  confidence: number;
+  critic_notes: string[];
+  retry_questions: string[];
+  claim_ledger: ClaimRecord[];
 }

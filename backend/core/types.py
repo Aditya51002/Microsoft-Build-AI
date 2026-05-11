@@ -21,6 +21,7 @@ class TaskStatus(str, Enum):
     DONE = "DONE"
     FAILED = "FAILED"
     RETRY = "RETRY"
+    CANCELLED = "CANCELLED"
 
 
 class MessageType(str, Enum):

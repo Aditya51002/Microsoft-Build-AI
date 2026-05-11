@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from typing import Any, AsyncIterator, Dict
 
 import redis.asyncio as redis
@@ -27,6 +28,18 @@ class MessageBus:
         payload = message.model_dump(mode="json")
         await self._redis.publish(channel, json.dumps(payload))
 
+        if channel.startswith("ws:broadcast:"):
+            session_id = channel.split("ws:broadcast:", 1)[-1]
+            key = f"session:{session_id}:events"
+            event_payload = {
+                "timestamp_ms": int(time.time() * 1000),
+                "event": payload,
+            }
+            try:
+                await self._redis.rpush(key, json.dumps(event_payload))
+            except Exception:
+                pass
+
     async def subscribe(self, channel: str) -> AsyncIterator[AgentMessage]:
         """Subscribe to a Redis channel and yield AgentMessage instances."""
 
@@ -42,6 +55,21 @@ class MessageBus:
             await pubsub.unsubscribe(channel)
             await pubsub.close()
 
+    async def subscribe_pattern(self, pattern: str) -> AsyncIterator[AgentMessage]:
+        """Subscribe to Redis channels matching a pattern and yield messages."""
+
+        pubsub = self._redis.pubsub()
+        await pubsub.psubscribe(pattern)
+        try:
+            async for raw in pubsub.listen():
+                if raw.get("type") != "pmessage":
+                    continue
+                data = json.loads(raw.get("data", "{}"))
+                yield self._deserialize_message(data)
+        finally:
+            await pubsub.punsubscribe(pattern)
+            await pubsub.close()
+
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
         """Retrieve session state data from Redis."""
 
@@ -55,10 +83,11 @@ class MessageBus:
         await self._redis.hset(key, mapping={"status": status.value})
 
     @staticmethod
-    def channel_name(agent_type: AgentType, session_id: str) -> str:
+    def channel_name(agent_type: AgentType | str, session_id: str) -> str:
         """Build the canonical channel name for an agent and session."""
 
-        return f"agent:{agent_type.value}:{session_id}"
+        value = agent_type.value if hasattr(agent_type, "value") else str(agent_type)
+        return f"agent:{value}:{session_id}"
 
     @staticmethod
     def _deserialize_message(data: Dict[str, Any]) -> AgentMessage:

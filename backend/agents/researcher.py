@@ -16,6 +16,7 @@ from anthropic import AsyncAnthropic
 from agents.base_agent import BaseAgent
 from core.message_bus import MessageBus
 from core.schemas import AgentMessage, AgentResult, TaskMessage
+from core.retry import SEARCH_RETRY, retry_with_backoff
 from core.types import AgentType, MessageType, TaskStatus
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
@@ -82,22 +83,27 @@ class ResearcherAgent(BaseAgent):
         search_keywords = self._require_str_list(message.payload, "search_keywords")
 
         start_time = time.perf_counter()
-        try:
-            parsed, raw_text, sources, result_count = await self._research(
+        if self._demo_mode_enabled():
+            parsed, raw_text, sources, result_count = self._demo_research(
                 sub_question, search_keywords
             )
-            if result_count == 0:
-                broader = self._broaden_keywords(search_keywords)
-                self._logger.warning(
-                    "No web search results for task %s; retrying with broader keywords: %s",
-                    task_id,
-                    broader,
+        else:
+            try:
+                parsed, raw_text, sources, result_count = await self._research(
+                    sub_question, search_keywords
                 )
-                parsed, raw_text, sources, _ = await self._research(
-                    sub_question, broader
-                )
-        except asyncio.TimeoutError as exc:
-            raise RetryableError("Claude request timed out") from exc
+                if result_count == 0:
+                    broader = self._broaden_keywords(search_keywords)
+                    self._logger.warning(
+                        "No web search results for task %s; retrying with broader keywords: %s",
+                        task_id,
+                        broader,
+                    )
+                    parsed, raw_text, sources, _ = await self._research(
+                        sub_question, broader
+                    )
+            except asyncio.TimeoutError as exc:
+                raise RetryableError("Claude request timed out") from exc
 
         duration = time.perf_counter() - start_time
 
@@ -122,20 +128,6 @@ class ResearcherAgent(BaseAgent):
             sources=sources,
             confidence=confidence,
         )
-
-    async def emit_result(self, result: AgentResult) -> None:
-        """Publish a task result to the analyst channel."""
-
-        message = AgentMessage(
-            type=MessageType.TASK_RESULT,
-            from_agent=AgentType.RESEARCHER,
-            to_agent=AgentType.ANALYST,
-            payload=result.model_dump(mode="json"),
-            status=TaskStatus.DONE,
-            confidence=result.confidence,
-        )
-        channel = self.message_bus.channel_name(AgentType.ANALYST, self._session_id)
-        await self.message_bus.publish(channel, message)
 
     async def handle_error(self, error: Exception, task_id: str) -> None:
         """Handle retries and errors without crashing the agent loop."""
@@ -198,7 +190,8 @@ class ResearcherAgent(BaseAgent):
         result_count = 0
         while True:
             response = await asyncio.wait_for(
-                self.anthropic_client.messages.create(
+                self._call_anthropic(
+                    self.anthropic_client.messages.create,
                     model=CLAUDE_MODEL,
                     max_tokens=CLAUDE_MAX_TOKENS,
                     temperature=CLAUDE_TEMPERATURE,
@@ -259,9 +252,17 @@ class ResearcherAgent(BaseAgent):
         beta_tools = getattr(getattr(self.anthropic_client, "beta", None), "tools", None)
 
         if client_tools and hasattr(client_tools, "web_search"):
-            raw = await client_tools.web_search(query=query)
+            raw = await retry_with_backoff(
+                client_tools.web_search,
+                query=query,
+                config=SEARCH_RETRY,
+            )
         elif beta_tools and hasattr(beta_tools, "web_search"):
-            raw = await beta_tools.web_search(query=query)
+            raw = await retry_with_backoff(
+                beta_tools.web_search,
+                query=query,
+                config=SEARCH_RETRY,
+            )
         else:
             raise RuntimeError("Anthropic web_search tool is not available in this SDK")
 
@@ -352,6 +353,49 @@ class ResearcherAgent(BaseAgent):
         """Extract URLs from text content."""
 
         return list(dict.fromkeys(URL_PATTERN.findall(text)))
+
+    def _demo_research(
+        self, sub_question: str, search_keywords: List[str]
+    ) -> Tuple[Dict[str, Any], str, List[str], int]:
+        """Return deterministic research findings for offline demos."""
+
+        source = "https://learn.microsoft.com/azure/architecture/ai-ml/"
+        focus = self._demo_focus(sub_question)
+        keyword_text = ", ".join(search_keywords[:3])
+        parsed = {
+            "findings": [
+                {
+                    "fact": f"The {focus} dimension should be evaluated with explicit evidence, uncertainty, and human review checkpoints.",
+                    "source": source,
+                    "confidence": 0.78,
+                },
+                {
+                    "fact": f"Relevant evaluation signals include {keyword_text}; together they map to product fit, feasibility, and risk.",
+                    "source": "https://learn.microsoft.com/azure/architecture/guide/",
+                    "confidence": 0.72,
+                },
+            ],
+            "summary": (
+                "The strongest answer will combine market evidence, architecture quality, "
+                "responsible AI controls, and a clear operational workflow."
+            ),
+            "key_data_points": [
+                "Evidence traceability is required for trustworthy research output.",
+                "Human-in-the-loop review improves usability for high-stakes decisions.",
+            ],
+        }
+        return parsed, json.dumps(parsed), [source, "https://learn.microsoft.com/azure/architecture/guide/"], 2
+
+    def _demo_focus(self, sub_question: str) -> str:
+        """Extract a readable focus phrase from a demo sub-question."""
+
+        lowered = sub_question.lower()
+        marker = "evaluate "
+        if marker in lowered:
+            start = lowered.index(marker) + len(marker)
+            focus = sub_question[start:].strip().rstrip(".")
+            return focus or "research"
+        return "research"
 
     def _require_str(self, payload: Dict[str, Any], key: str) -> str:
         """Fetch a required string field from payload."""

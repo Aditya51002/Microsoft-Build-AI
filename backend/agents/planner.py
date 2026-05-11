@@ -25,38 +25,11 @@ class PlannerAgent(BaseAgent):
         super().__init__(AgentType.PLANNER, message_bus, anthropic_client)
 
     async def process(self, message: TaskMessage) -> AgentResult:
-        """Plan a set of research tasks and dispatch them to researchers."""
+        """Plan a set of research tasks for the orchestrator to dispatch."""
 
         self._sync_session_from_message(message)
         user_query = self._extract_user_query(message)
         plan = await self._request_plan(user_query)
-
-        session_id = self._session_id
-        researcher_channel = self.message_bus.channel_name(AgentType.RESEARCHER, session_id)
-
-        for task in plan["tasks"]:
-            task_id = UUID(task["id"])
-            payload = {
-                "sub_question": task["sub_question"],
-                "search_keywords": task["search_keywords"],
-                "priority": task["priority"],
-                "synthesis_guidance": plan["synthesis_guidance"],
-                "session_id": session_id,
-            }
-            sub_task = TaskMessage(
-                type=MessageType.TASK_ASSIGN,
-                from_agent=AgentType.PLANNER,
-                to_agent=AgentType.RESEARCHER,
-                payload=payload,
-                status=TaskStatus.PENDING,
-                confidence=0.9,
-                task_id=task_id,
-                parent_task_id=message.task_id,
-                depth=message.depth + 1,
-            )
-            await self.message_bus.publish(researcher_channel, sub_task)
-
-        await self.emit_status(str(message.task_id), TaskStatus.DONE)
 
         return AgentResult(
             task_id=message.task_id,
@@ -69,10 +42,13 @@ class PlannerAgent(BaseAgent):
     async def _request_plan(self, user_query: str) -> Dict[str, Any]:
         """Call Claude to generate and validate a planning response."""
 
+        if self._demo_mode_enabled():
+            return self._demo_plan(user_query)
+
         try:
             response = await self._call_claude(user_query, strict=False)
             return self._validate_plan(response)
-        except ValueError:
+        except (ValueError, json.JSONDecodeError):
             response = await self._call_claude(user_query, strict=True)
             return self._validate_plan(response)
 
@@ -108,7 +84,8 @@ class PlannerAgent(BaseAgent):
             },
         }
 
-        response = await self.anthropic_client.messages.create(
+        response = await self._call_anthropic(
+            self.anthropic_client.messages.create,
             model="claude-sonnet-4-20250514",
             max_tokens=1000,
             temperature=0.3,
@@ -184,6 +161,34 @@ class PlannerAgent(BaseAgent):
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Task payload must include user_query")
         return query.strip()
+
+    def _demo_plan(self, user_query: str) -> Dict[str, Any]:
+        """Generate a deterministic high-quality plan for offline demos."""
+
+        themes = [
+            ("Market demand and user pain", ["market size", "customer pain", user_query]),
+            ("Competitive landscape", ["competitors", "alternatives", user_query]),
+            ("Technical feasibility and architecture", ["technical feasibility", "system design", user_query]),
+            ("Risk, regulation, and responsible AI", ["regulation", "risk", "responsible AI", user_query]),
+            ("Go-to-market and measurable impact", ["go to market", "business impact", user_query]),
+        ]
+        tasks = []
+        for priority, (theme, keywords) in enumerate(themes, start=1):
+            tasks.append(
+                {
+                    "id": str(uuid4()),
+                    "sub_question": f"For '{user_query}', evaluate {theme.lower()}.",
+                    "search_keywords": keywords,
+                    "priority": priority,
+                }
+            )
+        return {
+            "tasks": tasks,
+            "synthesis_guidance": (
+                "Prioritize decision-grade evidence, cite every important claim, "
+                "and call out uncertainties that need human review."
+            ),
+        }
 
 
 async def run_planner_test() -> None:
